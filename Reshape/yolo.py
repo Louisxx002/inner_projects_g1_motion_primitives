@@ -23,7 +23,7 @@ class YoloNode(Node):
         self.bridge = CvBridge()
 
         # 加载模型（改成你的）
-        self.model = YOLO("yolo26x-seg.pt")  
+        self.model = YOLO("yolo26s-seg.pt")  
         # self.model = YOLO("best.pt")
         """
         x: carrot 0.6

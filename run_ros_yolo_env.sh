@@ -9,10 +9,10 @@ source /opt/ros/jazzy/setup.bash
 set -u
 
 if [[ $# -gt 0 ]]; then
-  exec conda run -n g1-primitives-ros312 "$@"
+  exec conda run -n "${G1_PRIMITIVES_ENV_ROS2:-g1-primitives-ros312}" "$@"
 fi
 
 source "${HOME}/miniconda3/etc/profile.d/conda.sh"
-conda activate g1-primitives-ros312
+conda activate "${G1_PRIMITIVES_ENV_ROS2:-g1-primitives-ros312}"
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 exec bash

@@ -86,7 +86,7 @@ class Open3DGraspVizNode(Node):
         self.declare_parameter("color_topic", "/camera/camera/color/image_raw")
         self.declare_parameter("depth_topic", "/camera/camera/aligned_depth_to_color/image_raw")
         self.declare_parameter("camera_info_topic", "/camera/camera/color/camera_info")
-        self.declare_parameter("model_path", "yolo26x-seg.pt")
+        self.declare_parameter("model_path", "yolo26s-seg.pt")
         self.declare_parameter("target_class", ["carrot", "hot dog","apple"])
         self.declare_parameter("publish_debug_image", True)
         self.declare_parameter("point_stride", 3)
