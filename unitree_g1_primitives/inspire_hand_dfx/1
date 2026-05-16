@@ -1,0 +1,4 @@
+ssh unitree@192.168.123.164 
+123
+cd dfx_inspire_service/build/
+sudo ./inspire_g1

@@ -1,0 +1,262 @@
+整体结构
+
+这套代码其实分成两层：
+
+examples/basic_usage.py 是任务脚本，负责“什么时候去哪里、抓还是放、点从哪里来”。
+见 basic_usage.py (line 339)
+
+g1_primitives/primitives.py 是动作原语层，负责把“去某个点、抓手、保持”变成机器人真正执行的控制命令。
+见 primitives.py (line 57)
+
+可以把它理解成：
+任务脚本 -> 原语接口 -> IK/底层控制器 -> 机器人
+
+脚本层逻辑
+
+basic_usage.py 顶部先定义环境和默认参数，比如 xr_teleoperate 路径、DDS 网卡、初始腕部位置、默认抓取/放置点。
+见 basic_usage.py (line 31)
+
+SimpleDex3Controller 是我们后来加的一个简化手部控制器。它做的事很简单：后台线程持续读取两个共享数组 left_hand_array/right_hand_array，把这 7 维手指目标直接发布到 Dex3 的 DDS 话题。
+见 basic_usage.py (line 47)
+
+_import_unitree_controllers() 负责把 xr_teleoperate 里的控制器加载进来：
+
+G1_29_ArmController：手臂关节控制
+G1_29_ArmIK：逆运动学
+MotionSwitcher：切机器人模式
+见 basic_usage.py (line 144)
+prompt_points() 是你现在要的“开动之前在命令行输入点”。脚本启动后会先停住，等你输入 pick 和 place 两个三维点；如果直接回车，就用默认值。
+见 basic_usage.py (line 192)
+
+setup_real_robot() 是真正接线的地方：
+
+切到 xr_teleoperate/teleop，保证相对 URDF 路径可用
+初始化 DDS
+尝试把机器人切到 Debug mode
+初始化手臂控制器、IK、手部发布器
+创建 G1Primitives 实例
+见 basic_usage.py (line 210)
+run_autonomous_pick_and_place() 是任务编排。它不是直接算关节，而是按步骤调用原语：
+
+张手
+去抓取点上方
+下探到抓取点
+抓取
+抬起
+去放置点上方
+下探到放置点
+放开
+撤离
+见 basic_usage.py (line 261)
+main() 是入口：
+
+解析命令行参数
+--dry-run 时只检查环境
+否则先让你输入点
+再初始化机器人
+最后执行抓放流程
+见 basic_usage.py (line 339)
+原语层逻辑
+
+G1Primitives.__init__() 把所有底层依赖接进来，并保存两类核心状态：
+
+手臂状态：当前腕部位姿、上一帧力矩解
+手部状态：左右手共享数组、开闭状态
+见 primitives.py (line 75)
+里面还定义了手部开合的关节目标：
+
+open_pos
+closed_pos
+见 primitives.py (line 106)
+grab() 的逻辑是：从当前手指关节位置插值到闭合位置，逐步写入共享数组，所以手会平滑闭合。
+见 primitives.py (line 152)
+
+release() 则相反：立即把目标切到张开位置，然后在一小段时间里持续维持手臂和手部状态。
+见 primitives.py (line 236)
+
+hold_position() 会读取当前双臂关节角，然后不断把这个姿态重复发下去，实现“停住不动”。
+见 primitives.py (line 207)
+
+最关键的是 dual_arm_movement()：
+
+先决定目标点
+如果你传了 left_hand_pos，就用绝对坐标；否则用当前位置加增量。
+见 primitives.py (line 278)
+
+把目标位置和腕部角度拼成 SE3 末端位姿。
+见 primitives.py (line 323)
+
+调用 IK 求解器，把左右腕目标位姿解成 14 维双臂关节角 sol_q 和补偿力矩 sol_tauff。
+见 primitives.py (line 336)
+
+用 np.linspace 从当前关节角插值到目标关节角，形成一条平滑关节轨迹。
+见 primitives.py (line 345)
+
+在轨迹循环里，每一步都：
+
+调用 arm_controller.ctrl_dual_arm(q, sol_tauff) 发手臂命令
+同时把左右手保持在当前开/闭状态
+见 primitives.py (line 350)
+结束后更新内部保存的腕部位姿和最新力矩，这样下一步动作会以“上一步结束的位置”为起点。
+见 primitives.py (line 360)
+
+数据是怎么流的
+
+你在终端输入两个点后，数据流是这样的：
+
+main() 收到 pick/place 点
+见 basic_usage.py (line 377)
+
+run_autonomous_pick_and_place() 把它们变成“上方点 + 目标点”
+见 basic_usage.py (line 269)
+
+每一步调用 G1Primitives 的 release / grab / dual_arm_movement
+
+dual_arm_movement() 把笛卡尔空间目标点变成关节空间轨迹
+
+手臂轨迹通过 G1_29_ArmController 发到机器人
+手部关节值通过 SimpleDex3Controller 发到 Dex3 DDS 话题
+
+一句话总结
+
+这套代码本质上是在做：
+
+你给“手要去哪里”
+basic_usage.py 决定动作顺序
+G1Primitives 把动作变成原语
+IK 把末端点变成关节角
+底层控制器把关节命令发给 G1 和 Dex3
+
+
+
+我已经把卡住的手部控制器换掉了。现在 basic_usage.py 不再走 Dex3_1_Controller 那条 XR/重定向链路，而是用一个最小后台发布器，直接把 g1_primitives 生成的 7 维手指目标持续发到 rt/dex3/left/cmd 和 rt/dex3/right/cmd。这更适合你现在这种“不要遥操作，只跑脚本动作”的场景。
+
+
+
+运动逻辑
+
+这套代码的“运动”本质上是两条并行链路：
+
+手臂：你给一个末端目标点，代码先做 IK，再把结果插值成一串关节角，逐步发给 G1 手臂控制器。
+手：不是做 IK，而是直接把预设好的“张开/闭合”关节值写到共享数组，再由后台控制器持续发布。
+最核心的运动入口在 primitives.py (line 278) 的 dual_arm_movement()。
+
+手臂怎么动
+
+你在任务脚本里给的是点，比如 pick_pos、place_pos。这些点在 basic_usage.py (line 261) 传给：
+
+primitives.dual_arm_movement(left_hand_pos=...)
+dual_arm_movement() 里面的流程是：
+
+先确定目标位置
+见 primitives.py (line 306)
+如果传了 left_hand_pos，就把它当成左手腕目标点；如果没传，就用当前位置加 delta。
+
+把目标点变成末端位姿 SE3
+见 primitives.py (line 323)
+这里不仅有位置 [x,y,z]，还有腕部姿态角 left_angle_deg/right_angle_deg。代码先把角度转成四元数，再构造：
+
+L_tf_target
+R_tf_target
+读取当前双臂关节状态
+见 primitives.py (line 336)
+调用：
+
+arm_controller.get_current_dual_arm_q()
+arm_controller.get_current_dual_arm_dq()
+做逆运动学 IK
+见 primitives.py (line 338)
+这里调用 _solve_ik_iterative(...)，它会反复调用底层 IK：
+
+输入：左右腕目标位姿
+输出：
+sol_q：14 维双臂目标关节角
+sol_tauff：补偿力矩
+把“当前关节角 -> 目标关节角”插值成轨迹
+见 primitives.py (line 345)
+用：
+
+q_traj = np.linspace(current_q, sol_q, n_steps)
+这意味着运动不是一步跳过去，而是平滑分成很多小步。
+
+逐步下发每一个关节角
+见 primitives.py (line 350)
+循环里每一步都调用：
+self.arm_controller.ctrl_dual_arm(q, sol_tauff)
+这才是真正把手臂命令发到机器人。
+
+最后做一次收敛
+见 primitives.py (line 360)
+_send_commands_to_arms(...) 会继续发命令，直到当前关节角接近目标角。
+
+更新内部“当前位置记忆”
+见 primitives.py (line 364)
+把 self.wrist_positions['left/right'] 更新成新目标，后续动作就以这个位置为起点。
+
+一句话说，手臂逻辑是：
+目标点 -> 目标位姿 -> IK -> 目标关节角 -> 插值轨迹 -> 连续发关节命令
+
+手怎么动
+
+手的逻辑比手臂简单很多，不做 IK。
+
+在 primitives.py (line 106) 里定义了：
+
+open_pos
+closed_pos
+grab() 的逻辑：
+见 primitives.py (line 152)
+
+取当前手指关节值
+从当前值插值到 closed_pos
+每一步写入 left_hand_array 或 right_hand_array
+把 hand_state[hand] 标成 'closed'
+release() 的逻辑：
+见 primitives.py (line 236)
+
+直接把目标写成 open_pos
+把状态标成 'open'
+在一小段时间里持续维持这个状态
+然后在 basic_usage.py (line 47) 里的 SimpleDex3Controller 后台线程，会一直读取这些数组，把目标发布出去。
+
+所以手的逻辑是：
+grab/release -> 改共享数组 -> 后台线程持续发手部命令
+
+任务脚本怎么组织这些动作
+
+任务编排在 basic_usage.py (line 261) 的 run_autonomous_pick_and_place()。
+
+它把一个完整动作拆成 9 步：
+
+release：先张开手
+dual_arm_movement(pre_pick)：移动到抓取点上方
+dual_arm_movement(pick_pos)：下探
+grab：闭手
+dual_arm_movement(pre_pick)：抬起
+dual_arm_movement(pre_place)：移动到放置点上方
+dual_arm_movement(place_pos)：下探
+release：放开
+dual_arm_movement(pre_place)：撤离
+这里的 pre_pick/pre_place 是：
+
+在真实点上方加一个 approach_offset_z
+避免机械臂横着撞过去
+见 basic_usage.py (line 269)
+
+为什么你能在命令行输入点
+
+在 basic_usage.py (line 192) 的 prompt_points() 里，脚本在运动开始前会让你输入：
+
+Pick point [x y z]
+Place point [x y z]
+这些点最后会传进 run_autonomous_pick_and_place()，再一路传到 dual_arm_movement()。
+
+所以你输入的不是“关节角”，而是“手腕要去的空间坐标”。
+
+当前这套运动逻辑的关键特点
+
+它是“末端点位驱动”，不是“手动写每个关节角”。
+手臂靠 IK 算关节角。
+手靠预设开合姿态。
+运动平滑的原因是 np.linspace 做了插值。
+整个抓放流程只是按顺序调用几个基础原语。
